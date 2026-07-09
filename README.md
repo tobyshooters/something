@@ -58,5 +58,5 @@ export default {
 Anything you'd normally reach for a Lua filter or LaTeX macro for is a
 remark/rehype plugin plus a CSS rule.
 
-See `sample-book/` for a working project and `agent-notes/plan.md` for
+See `sample-book/` for a working project and `docs/plan.md` for
 the pipeline, extension surface, and design rationale.
