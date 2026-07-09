@@ -1,270 +1,239 @@
-# `./something` — a Bun-based markdown-to-print CLI
+# `something` — a Bun-based markdown-to-print CLI
 
-## Context
+## What it is
 
-`doc-thesis/` is currently built through a Makefile that invokes `pandoc
---pdf-engine=xelatex` with a stack of Lua filters, a `template.md` full of
-`header-includes` LaTeX packages, and a CSL file for ABNT citations. It
-works but is fragile: the template is ~70 lines of LaTeX packaging around a
-single `##INSERT##`, `format.lua` threads raw LaTeX into every margin note
-and citation, and any change to styling means editing Lua that emits LaTeX
-macros.
+A small Bun CLI that turns a folder of markdown into a paginated,
+print-ready PDF. The pipeline is:
 
-We want to replace the toolchain with a small **Bun CLI** that:
-- reads markdown + local CSS + images from a project directory,
-- pipes markdown through `remark` (pandoc-style footnotes/citations,
-  `remark-directive` for everything class-shaped),
-- renders to HTML paginated with **paged.js**,
-- serves the result at `localhost` with live-reload during editing,
-- exports a print-ready PDF via headless Chromium + paged.js.
+```
+md → unified/remark → html → paged.js → chromium print → pdf
+```
 
-Scope for v1 (deliberately narrow):
-- Bun runtime, single-package project.
-- Reader PDF only. **No imposition** in v1.
-- Static preview server with WebSocket live-reload — one paginated view.
-- Two-page spread rendered by default in preview.
+Three commands:
 
-The name `./something` is a placeholder. Candidates: `folio`, `signature`,
-`pauta`, `press`. Non-blocking.
+```
+something init    <dir>   # scaffold a new book from sample-book/
+something preview <dir>   # live-reloading preview at localhost:4000
+something export  <dir>   # write <dir>/book.pdf via pagedjs-cli
+```
 
-## The userspace model (important)
+## The userspace model
 
-**The tool ships small and dumb.** Everything specific — how a margin note
-looks, what a citation renders as, how a spread is composed, whether images
-get gray boxes in draft mode — lives in the **user's book project**, not
-in the tool. Extension is the primary interface.
+**The tool ships small and dumb.** Everything specific — how a margin
+note looks, what a citation renders as, how a spread is composed,
+whether images get gray boxes in draft mode — lives in the **user's
+book project**, not in the tool. Extension is the primary interface.
 
 A book project looks like:
 
 ```
 my-book/
-  content/*.md            # alphabetical order
+  content/*.md            # concatenated in alphabetical order
   images/
-  refs.bib
+  refs.bib                # optional; simple @type{key, field = {value}}
   style.css               # @page rules, class visuals, custom props
   something.config.ts     # optional — user's plugin surface
 ```
 
-`something.config.ts` is a plain Bun-loadable module that exports:
+`something.config.ts` is a plain Bun-loadable module. Everything on it
+is optional; a project with no config file still builds.
 
 ```ts
 export default {
-  // Add or override directive → HTML mappings.
-  // Simple case: tag + class. Complex: a function returning hast.
+  // Directive → HTML mappings. Both simple and container forms:
+  //   :margin[text]              → <span class="margin">text</span>
+  //   ::pagebreak                → <div class="pagebreak"></div>
+  //   :::figure ... :::          → <figure class="figure">...</figure>
   directives: {
-    margin:   { tag: "aside",  class: "margin" },
-    callout:  { tag: "div",    class: "callout" },
-    manicule: (node) => ({ type: "element", tagName: "span", ... }),
+    margin:    { tag: "span",    class: "margin" },
+    pagebreak: { tag: "div",     class: "pagebreak" },
+    figure:    { tag: "figure",  class: "figure" },
+    cover:     { tag: "section", class: "cover" },
   },
-  // Extra remark/rehype plugins the user wants in the pipeline.
-  remarkPlugins:  [ myCustomPlugin ],
+
+  // Extra plugins spliced into the unified pipeline.
+  remarkPlugins:  [],
   rehypePlugins:  [],
-  // Anything else needed at build time (bib formatter override, etc.).
-  formatCitation: (entry, locator) => `${entry.author} (${entry.year})`,
+
+  // Override the baseline (author, year, p. N) citation string.
+  formatCitation: (entry, locator, mode) => `${entry.author} (${entry.year})`,
 };
 ```
 
-The tool's job is to:
-1. Provide a small, well-defined pipeline with obvious extension points.
-2. Load `something.config.ts` if present and merge its contributions.
-3. Serve, live-reload, export.
-
-The tool does **not** ship its own directive catalog beyond what's needed
-for a working baseline (`margin`, `figure`, `spread` — enough to have a
-useful default). Everything else — the specific manicule glyph, the
-sidenote arrow, the citation format, spread/imagepage logic — is
-userspace, layered on via `something.config.ts` + `style.css`.
-
-The doc-thesis `assets/` (format.lua, citesidenote.tex, dotprogress.tex,
-etc.) are **reference material for what userspace CAN do**, not a spec
-of what the tool must implement. Port them incrementally, in userspace,
-when we actually rebuild doc-thesis on top of this tool.
+**The tool ships no directive defaults.** Every class-shaped
+construct in a project comes from that project's own `directives`
+table plus a matching CSS rule. Adding a new kind of block =
+one config entry + one CSS rule. That's the whole extension surface
+for visuals.
 
 ## Tool architecture
 
-Flat, per `style.md`. Six files, no subpackages:
+Flat layout under `src/`, no subpackages:
 
 ```
-something/
-  main.ts            # CLI entry: dispatches preview / export / init
-  build.ts           # md → html pipeline (remark + directives + citations)
-  serve.ts           # HTTP server, file watcher, WebSocket live-reload
-  export.ts          # HTML → PDF via pagedjs-cli or puppeteer
-  templates/
-    default.html     # HTML shell that loads paged.js + user style.css
-    default.css      # minimal baseline: page geometry + core classes
-  package.json
+src/
+  main.ts        # CLI entry: dispatches init / preview / export
+  build.ts       # md → html pipeline (remark + directives + citations)
+  citations.ts   # .bib parser + citations remark plugin
+  serve.ts       # HTTP server + fs.watch + WebSocket live-reload
+  export.ts      # HTML → PDF via pagedjs-cli
+  template.html  # HTML shell (loads paged.js + style.css)
+  template.css   # baseline stylesheet, copied into empty projects
+sample-book/     # what `init` copies
 ```
 
-Anything that can be inlined into `build.ts` should be. The default
-directive registry, the `.bib` parser, and config loading all live inside
-`build.ts` as small tables/functions until one grows past ~150 lines.
+Anything that fits comfortably in one file lives in one file. Split
+only when a piece grows past a few hundred lines or gains an
+independent consumer.
 
-### Markdown syntax (hybrid)
+### Markdown syntax
 
-- **Footnotes** — pandoc-style `[^1]` via `remark-gfm`.
-- **Citations** — pandoc-style `[@key]`. Parsed against `refs.bib`,
-  rendered as an inline anchor + accumulated bibliography section. Format
-  is user-overridable via `formatCitation` in config; the baseline is a
-  simple author-year string.
-- **Margin notes** — leaf directive `:margin[text goes here]`.
-- **Figures, spreads, callouts, class-shaped blocks** — container
-  directives (`:::figure`, `:::spread`, `:::callout`, ...).
-- **Raw HTML** — always passed through untouched. Escape hatch.
+- **GFM extras** — tables, footnotes (`[^1]`), strikethrough, task lists
+  — via `remark-gfm`.
+- **Citations** — pandoc-style `[@key]` or `[@key, p. 42]`. Parsed
+  against `refs.bib`, rendered as an inline anchor plus a
+  `<section class="bibliography">` appended once at the end.
+  The default format is `(Author, Year, p. N)`; override with
+  `formatCitation` in config.
+- **Directives** — `remark-directive` provides three forms; the
+  project's `directives` table maps each name to `{tag, class}`:
+  - `:name[text]`     — inline / text
+  - `::name`          — leaf (self-closing)
+  - `:::name ... :::` — container
+- **Raw HTML** — always passes through (`rehype-raw`). Escape hatch
+  for anything the directive layer can't express.
 
-The **default directive registry** (baseline only):
+### The unified pipeline (`build.ts`)
 
-```ts
-const DEFAULT_DIRECTIVES = {
-  margin:  { tag: "aside",   class: "margin" },
-  figure:  { tag: "figure",  class: "figure" },
-  spread:  { tag: "section", class: "spread" },
-};
+```
+load something.config.ts (if present)
+concat content/*.md alphabetically
+  → unified()
+      .use(remarkParse)
+      .use(remarkGfm)                              // tables, footnotes
+      .use(remarkDirective)
+      .use(directivesToHast, config.directives)    // local plugin
+      .use(...config.remarkPlugins)
+      .use(citations, { bib, formatCitation })     // local plugin
+      .use(remarkRehype, { allowDangerousHtml: true })
+      .use(rehypeRaw)                              // keep inline HTML
+      .use(...config.rehypePlugins)
+      .use(rehypeStringify)
+  → substitute the body into template.html
 ```
 
-`something.config.ts` merges into and overrides this table. Adding a new
-class-shaped construct = one entry in user config + one CSS rule in
-`style.css`. That's the "easy way to add a new kind of class" the user
-asked for.
+`directivesToHast` walks the mdast, and for any directive whose name
+appears in the registry sets `data.hName` and `data.hProperties.className`
+so `remark-rehype` emits the right element. Unknown directive names
+pass through unchanged (rendered as their fallback text).
+
+The `citations` plugin walks text nodes, matches `[@key]` /
+`[@key, locator]`, replaces each with an `<a class="cite" href="#bib-key">`,
+and appends the bibliography section. The `.bib` reader is a small
+handwritten parser — entry type, key, and common fields; no full CSL
+processor.
 
 ### CSS as the single source of styling truth
 
-`style.css` (in the user's project) owns page geometry via paged.js's
-`@page` model:
+`style.css` owns page geometry, typography, and every class visual.
+Paged.js gives us the CSS `@page` model:
 
 ```css
 @page {
   size: A5;
-  margin: 2cm 1cm 1cm 2cm;
+  margin: 2cm 4cm 1.5cm 1.5cm;
   @bottom-center { content: counter(page); }
 }
-@page :left  { margin-left: 1cm;  margin-right: 2cm; }
-@page :right { margin-left: 2cm;  margin-right: 1cm; }
+@page :left  { margin-left: 4cm;   margin-right: 1.5cm; }  /* verso */
+@page :right { margin-left: 1.5cm; margin-right: 4cm;   }  /* recto */
 
-:root {
-  --font-body: "Iowan Old Style", Georgia, serif;
-  --font-size: 10pt;
-}
-
-body      { font-family: var(--font-body); font-size: var(--font-size); }
-p         { text-align: justify; hyphens: auto; }
-.margin   { font-size: 0.75em; float: right; ... }
-.figure   { break-inside: avoid; }
-.spread   { page: spread; break-before: right; }
-h1        { break-before: right; margin-top: 30%; }
+h1 { break-before: right; margin-top: 30%; }  /* chapter → recto */
+.margin  { width: 3cm; float: right; margin-right: -3.5cm; ... }
+.figure  { break-inside: avoid; }
+.cover   { break-before: right; break-after: page; display: flex; ... }
 ```
 
-Page size, margin, font, and every class visual live here. No hidden
-config file for styling.
+If a project has no `style.css`, `export.ts` drops the tool's
+`template.css` in for the run and removes it after. Preview's
+`serve.ts` does the same fallback via HTTP.
 
-`templates/default.css` ships a fully-working baseline. `something init`
-copies it into the user's project so they can edit in place.
+### Left/right-aware handlers
 
-### Two-page spread in preview
+Paged.js's Polisher strips any selector containing `.pagedjs_left_page`
+/ `.pagedjs_right_page` from user stylesheets, so CSS alone can't
+express "float the margin note outward on this side." We register a
+paged.js `Handler` in `template.html` whose `afterPageLayout` inspects
+each finished page and sets `float` + outer offset on `.margin`
+elements. Handler registration happens before `paged.polyfill.js`
+loads, via `window.PagedConfig.before`.
 
-paged.js emits one `.pagedjs_page` element per printed page. Default CSS
-wraps them in a flex row so they render side-by-side at 1:1 scale,
-matching the printed book. `@media print` rules undo this so the exported
-PDF is one page per PDF page.
-
-### Pipeline (`build.ts`)
-
-```
-load something.config.ts (if present)
-concat *.md alphabetically
-  → unified().use(remarkParse)
-           .use(remarkGfm)                              // tables, footnotes
-           .use(remarkDirective)
-           .use(directivesToHast, mergedDirectives)     // local plugin
-           .use(...userRemarkPlugins)
-           .use(citations, { bib, formatCitation })     // local plugin
-           .use(remarkRehype, { allowDangerousHtml: true })
-           .use(rehypeRaw)                              // keep raw HTML
-           .use(...userRehypePlugins)
-           .use(rehypeStringify)
-  → inject body into templates/default.html
-```
-
-The `citations` plugin walks text nodes, finds `[@key]` patterns, replaces
-them with `<a class="cite" href="#bib-key">…</a>`, and appends a
-`<section class="bibliography">`. Bib parsing: a small handwritten
-`.bib` reader (entry type, key, common fields). No external CSL processor
-in v1 — the baseline formatter is trivial; anything richer is userspace.
-
-### `serve.ts`
+### `serve.ts` — preview
 
 - Bun HTTP server on `localhost:4000`.
-- `GET /` → freshly built HTML.
-- `GET /style.css`, `GET /images/*` → served from the user's project dir.
-- WebSocket at `/ws` sends `"reload"` on any `.md` / `.css` / `.ts` /
-  image change (Bun `fs.watch`, recursive, debounced 100ms). Config
-  changes trigger a full rebuild + reload.
-- Injected script tag listens on the socket and calls `location.reload()`.
+- `GET /` → freshly rebuilt HTML with a WebSocket reload script
+  injected before `</body>`.
+- Other paths → served from the project dir. `GET /style.css`
+  falls back to the tool's `template.css` if the project has none.
+- `fs.watch(projectDir, { recursive: true })`, debounced 100ms;
+  dotfiles and tilde-backups ignored. Any change → all connected
+  sockets get `"reload"` → browser calls `location.reload()`.
 
-### `export.ts`
+### `export.ts` — PDF
 
-Single function: given a project dir, build HTML, write it to a temp file,
-invoke `pagedjs-cli` targeting that HTML, output to `book.pdf` in the
-project dir. Fall back to `puppeteer` + a small script that loads paged.js
-and calls `page.pdf(...)` if `pagedjs-cli` proves awkward under Bun.
-Decide at implementation time; don't build both.
+Builds HTML into `<project>/.something-build.html`, invokes
+`bunx pagedjs-cli -o book.pdf <that html>`, cleans up.
+
+**Gotcha:** `pagedjs-cli` injects `paged.polyfill.js` itself. If the
+HTML also loads it (which `template.html` does, for preview), pagedjs
+runs twice and paginates the already-paginated output — you get
+duplicated pages, mis-sized output, and content overlaid on later
+pages. `export.ts` strips the `<script src=".../paged.polyfill.js">`
+tag out of the built HTML before handing it to `pagedjs-cli`.
 
 ### CLI surface (`main.ts`)
 
 ```
-something preview <dir>   # start dev server, open browser
-something export  <dir>   # write book.pdf
-something init    <dir>   # scaffold content/, style.css, refs.bib,
-                          #   optional something.config.ts stub
+something init    <dir>   # cp -r sample-book/ <dir>
+something preview <dir>   # serve.ts
+something export  <dir>   # export.ts
 ```
 
-Bun's built-in arg parsing, no `commander`-style dependency.
+Bun's built-in arg parsing — no `commander`-style dependency.
 
-## What the tool does NOT ship
+## Anti-goals
 
-- The doc-thesis manicule glyph, dotprogress, strataglyph, citesidenote
-  layout — these are userspace, ported later when doc-thesis is
-  rebuilt on top of `./something`.
-- The specific ABNT citation format — userspace via `formatCitation`.
-- Draft mode / gray-box images — a userspace remark plugin + CSS toggle.
-- Imposition, TOC generation, systray, multiple themes — all deferred
-  or userspace.
+Things that are deliberately **not** the tool's job. Layer them in
+userspace via config + CSS + plugins:
 
-## Critical files (existing) to consult while implementing
-
-- `doc-thesis/content/*.md` — real-world corpus, use as the test set.
-- `doc-thesis/content/references.bib` — bib input the baseline parser
-  must handle. Start by making this file parse.
-- `doc-thesis/assets/format.lua`, `template.md`, `citesidenote.tex`,
-  `dotprogress.tex` — **reference for userspace capabilities**, not a
-  spec for the tool.
-- `/home/cristobal/dev/arquipelago/ferry/main.go`,
-  `.../source/server.go` — CLI+server shape to mirror.
+- Specific citation styles (ABNT, APA, Chicago). Baseline formatter
+  is trivial; anything richer goes in `formatCitation`.
+- Draft mode, gray-box images, watermarks — a small remark or rehype
+  plugin plus a CSS toggle.
+- Imposition (signature/booklet layout), TOC generation, multiple
+  built-in themes, systray / background app.
+- Any project-specific glyph, sidenote arrow, progress dot, or
+  chapter-opening flourish — every one of these is one directive
+  entry + one CSS rule away.
 
 ## Verification
 
 End-to-end, in this order:
 
-1. `something init /tmp/testbook` — scaffolds a project with one
-   placeholder `.md`, a `style.css`, empty `refs.bib`, empty config stub.
-2. `something preview /tmp/testbook` — opens `localhost:4000`. Confirm
-   two-page spread visible, edit the `.md`, confirm live reload fires
-   under 500ms.
-3. Drop `doc-thesis/content/01-language-manual.md` and its images into
-   the test book. Confirm: headings, block quotes, plain citations,
-   footnotes, images render — **using only baseline behavior**.
-   Anything that looks wrong is fixed in userspace (`style.css` +
-   `something.config.ts`), not by adding features to the tool.
-4. `something export /tmp/testbook` — produces `book.pdf`. Open in a
-   viewer: page size = A5, margins correct, headings on recto pages,
-   `:::spread` blocks span two pages.
-5. Sanity check: adding a new directive `:::warning` requires only one
-   entry in `something.config.ts` and one CSS rule. No tool edits.
-
-## Explicitly out of scope for v1
-
-- Imposition.
-- Multiple output themes.
-- CSL / arbitrary citation styles beyond the baseline formatter.
-- TOC generation, draft mode, systray, background app.
-- Any doc-thesis-specific visual (manicule, dotprogress, strata).
+1. `something init /tmp/testbook` — scaffolds `content/`, `style.css`,
+   `refs.bib`, `something.config.ts`, `images/`.
+2. `something preview /tmp/testbook` — opens `localhost:4000`. Edit a
+   `.md`, confirm live reload fires under 500ms. Confirm margin notes
+   float on the correct side across facing pages.
+3. `something export /tmp/testbook` — produces `book.pdf`. Open in a
+   viewer and check:
+   - page size = A5 (unless overridden in style.css),
+   - `pdfinfo` page count matches pagedjs's "Rendering N pages" line,
+   - chapter `<h1>` opens on a recto page,
+   - margin notes sit in the outer margin on both verso and recto,
+   - no duplicated pages, no overlapping content
+     (regression guard for the paged.js double-load bug).
+4. Sanity check the extension surface: add a `:::warning ... :::`
+   block to a `.md`. Confirm it renders as raw text until you add
+   `warning: { tag: "aside", class: "warning" }` to
+   `something.config.ts` and a matching `.warning { ... }` rule to
+   `style.css`. Then it should render styled — with zero tool edits.
