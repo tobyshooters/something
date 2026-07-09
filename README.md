@@ -1,72 +1,62 @@
 # something
 
-A small Bun CLI that turns a folder of markdown into a paginated,
-print-ready book via [paged.js](https://pagedjs.org).
-
-## Install
+A Bun CLI that turns a folder of markdown into a print-ready PDF via
+[paged.js](https://pagedjs.org).
 
 ```
 bun install
+bunk link
+
+something init    <dir>   # scaffold a new book from sample-book/
+something preview <dir>   # live-reloading preview at localhost:4000
+something export  <dir>   # write <dir>/book.pdf
 ```
 
-## Use
+## Layout and typography
 
-```
-something init <dir>       # scaffold a new book from sample-book/
-something preview <dir>    # live-reloading preview at http://localhost:4000
-something export  <dir>    # write <dir>/book.pdf
-```
-
-A book project looks like:
-
-```
-my-book/
-  content/*.md            # concatenated in alphabetical order
-  images/
-  refs.bib                # simple @type{key, field = {value}} entries
-  style.css               # @page rules, class visuals — edit freely
-  something.config.ts     # optional plugin surface
-```
-
-## Markdown
-
-- Footnotes via `remark-gfm`: `[^1]`
-- Citations against `refs.bib`: `[@key]`, `[@key, p. 42]`
-- Margin notes: `:margin[text]`
-- Class-shaped blocks: `:::figure`, `:::spread`, or anything you add
-  to `directives` in `something.config.ts`
-
-Raw HTML always passes through.
-
-## The pipeline
-
-Built on the [unified](https://unifiedjs.com) ecosystem, which treats
-markup as ASTs you transform with plugins:
-
-- `unified` — the runner. `.use(...).use(...).process(input)`.
-- `remark` — the markdown side. Parses into **mdast**; `remark-*`
-  plugins mutate mdast (`remark-gfm` for tables/footnotes,
-  `remark-directive` for `:foo[]` / `:::foo`).
-- `rehype` — the HTML side. AST is **hast**; `rehype-*` plugins
-  mutate hast (`rehype-raw` re-parses embedded HTML strings,
-  `rehype-stringify` serializes to a string).
-
-`remark-rehype` bridges the two:
-
-```
-md → remarkParse → mdast → (remark-*) → remark-rehype → hast → (rehype-*) → rehype-stringify → html
-```
+- **Full CSS `@page` control** — page size, margins, running heads, page
+  counters, `break-before: right`, `break-inside: avoid`, etc. live in your
+  `style.css`.
+- **Facing-page layout** — mirrored verso/recto margins, chapters open on the
+  recto.
+- **Citations** — `[@key]` and `[@key, p. 42]` resolve against
+  `refs.bib` and accumulate into a bibliography section.
+- **Margin notes** — `:margin[text]` floats to the outer margin.
+- **Footnotes, tables, task lists** — via GFM (`[^1]`, pipe tables, `- [ ]`).
+- **Directives for class-shaped blocks** — inline `:name[]`, leaf
+  `::name`, container `:::name ... :::`. Register a name in
+  `something.config.ts` and style it in `style.css`. Escape hatch:
+  raw HTML always passes through.
 
 ## Extending
 
-Add new directives, remark/rehype plugins, or a custom citation formatter
-in `something.config.ts`. See `sample-book/` for a working starting point
-and `agent-notes/plan.md` for the full extension surface.
+The tool ships small. Everything project-specific — which directives
+exist, how citations are formatted, extra pipeline steps — lives in
+your book's `something.config.ts`:
 
-## Layout
+```ts
+export default {
+  // Register class-shaped blocks. One entry here + one CSS rule = a
+  // new kind of block. The tool ships no directive defaults.
+  directives: {
+    margin:    { tag: "span",    class: "margin" },
+    figure:    { tag: "figure",  class: "figure" },
+    cover:     { tag: "section", class: "cover" },
+    // yours:
+    warning:   { tag: "aside",   class: "warning" },
+  },
 
+  // Splice your own plugins into the unified pipeline.
+  remarkPlugins: [],
+  rehypePlugins: [],
+
+  // Override the baseline "(Author, Year, p. N)" citation string.
+  formatCitation: (entry, locator, mode) => `${entry.author} ${entry.year}`,
+};
 ```
-src/          tool source
-sample-book/  what `init` copies
-agent-notes/  design docs
-```
+
+Anything you'd normally reach for a Lua filter or LaTeX macro for is a
+remark/rehype plugin plus a CSS rule.
+
+See `sample-book/` for a working project and `agent-notes/plan.md` for
+the pipeline, extension surface, and design rationale.
